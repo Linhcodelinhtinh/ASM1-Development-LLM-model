@@ -50,26 +50,29 @@ def apply_rotary_emb(
 
     _, seqlen, _, _ = query.shape
     device = query.device
-    # todo
-    #
     # Please refer to slide 22 in https://phontron.com/class/anlp2024/assets/slides/anlp-05-transformers.pdf
     # and Section 3 in https://arxiv.org/abs/2104.09864.
 
-    # reshape xq and xk to match the complex representation
-    query_real, query_imag = query.float().reshape(query.shape[:-1] + (-1, 2)).unbind(-1)
-    key_real, key_imag = key.float().reshape(key.shape[:-1] + (-1, 2)).unbind(-1)
-    # This separates each query/key vector into its odd and even indices (assuming *one-indexing*).
-    # query_real contains q_1, q_3, q_5, ... and query_imag contains q_2, q_4, q_6, ...
+    freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    t = torch.arange(seqlen, device=device).float()
+    freqs = torch.outer(t, freqs)  # (seqlen, head_dim/2)
 
-    # First, compute the trigonometric values in the second and fourth columns in
-    # slide 22 (linked above).
+    # Tạo complex tensor từ cos+i*sin
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # (seqlen, head_dim/2)
 
-    # Then, combine these trigonometric values with the tensors query_real, query_imag,
-    # key_real, and key_imag.
+    # Reshape query/key sang complex: (batch, seqlen, n_heads, head_dim/2)
+    query_complex = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+    key_complex   = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
 
-    raise NotImplementedError
+    # Reshape freqs_cis để broadcast: (1, seqlen, 1, head_dim/2)
+    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)
 
-    query_out = None
-    key_out = None
-    # Return the rotary position embeddings for the query and key tensors
+    # Nhân complex = xoay vector
+    query_out = torch.view_as_real(query_complex * freqs_cis).flatten(-2)
+    key_out   = torch.view_as_real(key_complex   * freqs_cis).flatten(-2)
+
+    # Cast về dtype gốc
+    query_out = query_out.type_as(query)
+    key_out   = key_out.type_as(key)
+
     return query_out, key_out
