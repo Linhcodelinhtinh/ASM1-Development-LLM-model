@@ -319,7 +319,7 @@ class Llama(LlamaPreTrainedModel):
 
         return idx
 
-def load_pretrained(checkpoint):
+def load_pretrained(checkpoint, dropout: Optional[float] = None):
   device = 'cuda' if torch.cuda.is_available() else 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
   #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
   dtype = "float32"
@@ -333,6 +333,8 @@ def load_pretrained(checkpoint):
   # init from a model saved in a specific directory
   checkpoint_dict = torch.load(checkpoint, map_location=device)
   config = LlamaConfig(**checkpoint_dict['model_args'])
+  if dropout is not None:
+      config.dropout = dropout
   model = Llama(config)
   state_dict = checkpoint_dict['model']
   unwanted_prefix = '_orig_mod.'

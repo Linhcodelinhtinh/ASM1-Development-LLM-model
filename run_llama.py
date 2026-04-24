@@ -67,7 +67,15 @@ class LlamaDataset(Dataset):
 
 
 # create the data which is a list of (sentence, label, token for the labels)
-def create_data(filename, tokenizer: Tokenizer, flag: str ='train', lower: bool = False, eos: bool = True, prompt_suffix: Optional[str]=None):
+def create_data(
+	filename,
+	tokenizer: Tokenizer,
+	flag: str ='train',
+	lower: bool = False,
+	eos: bool = True,
+	prompt_suffix: Optional[str] = None,
+	prompt_prefix: Optional[str] = None,
+):
 	# specify the tokenizer
 	num_labels = {}
 	data = []
@@ -78,6 +86,8 @@ def create_data(filename, tokenizer: Tokenizer, flag: str ='train', lower: bool 
 			if lower:
 				org_sent = org_sent.lower()
 			sent = org_sent.strip()
+			if prompt_prefix is not None:
+				sent = f"{prompt_prefix}{sent}"
 			if prompt_suffix is not None:
 				sent = f"{sent} {prompt_suffix}"
 			tokens = tokenizer.encode(sent, bos=True, eos=eos)
@@ -148,6 +158,7 @@ def train(args):
 
 	#### Init model
 	config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+			  'llama_dropout': args.llama_dropout,
 			  'pretrained_model_path': args.pretrained_model_path,
 			  'num_labels': num_labels,
 			  'data_dir': '.',
@@ -227,6 +238,38 @@ def write_predictions_to_file(split: str, outfile: str, acc: float, pred: list[s
 		for s, p in zip(sents, pred):
 			f.write(f"{p} ||| {s}\n")
 
+def build_prompt_template(label_names: list[str], few_shot: bool = False) -> tuple[Optional[str], str]:
+	if not few_shot:
+		if len(label_names) == 2:
+			label_name_str = " or ".join(label_names)
+		else:
+			label_name_str = ", ".join(label_names[:-1]) + ", or " + label_names[-1]
+		return None, f"Is this movie {label_name_str}? This movie is "
+
+	label_set = tuple(label_names)
+	if label_set == ("bad", "good"):
+		examples = [
+			("this movie was dull, predictable, and not worth the time.", "bad"),
+			("a warm, engaging story with strong performances.", "good"),
+		]
+	elif label_set == ("awful", "bad", "average", "good", "excellent"):
+		examples = [
+			("a painful mess with terrible acting and no emotional impact.", "awful"),
+			("there are a few decent moments, but overall it is weak and forgettable.", "bad"),
+			("the movie is fine, with some good parts and some boring parts.", "average"),
+			("an enjoyable film with solid acting and a satisfying story.", "good"),
+			("an outstanding and deeply moving movie from start to finish.", "excellent"),
+		]
+	else:
+		# Generic fallback that still works for arbitrary label sets.
+		examples = [(f"an example review for label {label}.", label) for label in label_names]
+
+	prompt_parts = ["Classify the sentiment of each movie review.\n\n"]
+	for review, label in examples:
+		prompt_parts.append(f"Review: {review}\nSentiment: {label}\n\n")
+	prompt_prefix = "".join(prompt_parts) + "Review: "
+	return prompt_prefix, "\nSentiment:"
+
 def test_with_prompting(args):
 	assert args.dev_out.endswith("dev-prompting-output.txt"), 'For saving prompting results, please set the dev_out argument as "<dataset>-dev-prompting-output.txt"'
 	assert args.test_out.endswith("test-prompting-output.txt"), 'For saving prompting results, please set the test_out argument as "<dataset>-test-prompting-output.txt"'
@@ -237,11 +280,13 @@ def test_with_prompting(args):
 		#### Load data
 		# create the data and its corresponding datasets and dataloader
 		tokenizer = Tokenizer(args.max_sentence_len)
-		label_names = json.load(open(args.label_names, 'r'))
+		with open(args.label_names, 'r', encoding='utf-8') as f:
+			label_names = json.load(f)
 		_, num_labels = create_data(args.train, tokenizer, 'train')
 
 		#### Init model
 		config = {'pretrained_model_path': args.pretrained_model_path,
+				'llama_dropout': args.llama_dropout,
 				'label_names': label_names,
 				'num_labels': num_labels,
 				'data_dir': '.',
@@ -249,19 +294,15 @@ def test_with_prompting(args):
 
 		config = SimpleNamespace(**config)
 
-		if len(label_names) == 2:
-			label_name_str = " or ".join(label_names)
-		else:
-			label_name_str = ", ".join(label_names[:-1]) + ", or " + label_names[-1]
-		prompt_suffix=f"Is this movie {label_name_str}? This movie is "
+		prompt_prefix, prompt_suffix = build_prompt_template(label_names, few_shot=args.few_shot)
 		model = LlamaZeroShotClassifier(config, tokenizer, label_names)
 		model = model.to(device)
 
-		dev_data = create_data(args.dev, tokenizer, 'valid', eos=False, prompt_suffix=prompt_suffix)
+		dev_data = create_data(args.dev, tokenizer, 'valid', eos=False, prompt_suffix=prompt_suffix, prompt_prefix=prompt_prefix)
 		dev_dataset = LlamaDataset(dev_data, args, eos=False)
 		dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=dev_dataset.collate_fn)
 
-		test_data = create_data(args.test, tokenizer, 'test', eos=False, prompt_suffix=prompt_suffix)
+		test_data = create_data(args.test, tokenizer, 'test', eos=False, prompt_suffix=prompt_suffix, prompt_prefix=prompt_prefix)
 		test_dataset = LlamaDataset(test_data, args, eos=False)
 		test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=test_dataset.collate_fn)
 
@@ -315,10 +356,13 @@ def get_args():
 	parser.add_argument("--generated_sentence_high_temp_out", type=str, default="generated-sentence-temp-1.txt")
 	parser.add_argument("--dev_out", type=str, default="cfimdb-dev-prompting-output.txt")
 	parser.add_argument("--test_out", type=str, default="cfimdb-test-prompting-output.txt")
+	parser.add_argument("--few_shot", action='store_true', help="Use a built-in few-shot prompt for prompting mode.")
 
 	# hyper parameters
 	parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
 	parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
+	parser.add_argument("--llama_dropout", type=float, default=None,
+						help="Override dropout inside the LLaMA backbone during model construction.")
 	parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
 						default=2e-5)
 

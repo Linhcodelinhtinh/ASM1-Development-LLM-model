@@ -11,7 +11,10 @@ class LlamaZeroShotClassifier(torch.nn.Module):
 	def __init__(self, config: LlamaConfig, tokenizer: Tokenizer, label_names: list[str]):
 		super(LlamaZeroShotClassifier, self).__init__()
 		self.num_labels = config.num_labels
-		self.llama = load_pretrained(config.pretrained_model_path)
+		self.llama = load_pretrained(
+			config.pretrained_model_path,
+			dropout=getattr(config, "llama_dropout", None),
+		)
 		# Zero-shot classification does not require updating llama paramters.
 		for param in self.llama.parameters():
 			param.requires_grad = False
@@ -34,7 +37,11 @@ class LlamaEmbeddingClassifier(torch.nn.Module):
 	def __init__(self, config):
 		super(LlamaEmbeddingClassifier, self).__init__()
 		self.num_labels = config.num_labels
-		self.llama = load_pretrained(config.pretrained_model_path)
+		self.pad_id = Tokenizer().pad_id
+		self.llama = load_pretrained(
+			config.pretrained_model_path,
+			dropout=getattr(config, "llama_dropout", None),
+		)
 		# If we use pretrain mode, we freeze Llama parameters.
 		for param in self.llama.parameters():
 			if config.option == 'pretrain':
@@ -47,15 +54,19 @@ class LlamaEmbeddingClassifier(torch.nn.Module):
 
 	def forward(self, input_ids):
 		'''
-		1) Find the hidden state after the final token of the input sequence
-		2) Apply dropout (self.dropout) to the hidden state at training time to mitigate
+		1) Compute a mean-pooled hidden state over all non-padding tokens
+		   in the input sequence.
+		2) Apply dropout (self.dropout) to the pooled hidden state at training time to mitigate
 		   overfitting.
 		2) Pass this through the classifier head (self.classifier_head), which will return
 		   logits (unnormalized probabilities) over all classes.
 		3) Take the log-softmax of the logits and return log-probabilities over all classes.
 		'''
 		_, hidden_states = self.llama(input_ids)
-		final_hidden_state = hidden_states[:, -1, :]
-		final_hidden_state = self.dropout(final_hidden_state)
-		logits = self.classifier_head(final_hidden_state)
+		attention_mask = (input_ids != self.pad_id).unsqueeze(-1).type_as(hidden_states)
+		masked_hidden_states = hidden_states * attention_mask
+		token_counts = attention_mask.sum(dim=1).clamp(min=1.0)
+		pooled_hidden_state = masked_hidden_states.sum(dim=1) / token_counts
+		pooled_hidden_state = self.dropout(pooled_hidden_state)
+		logits = self.classifier_head(pooled_hidden_state)
 		return F.log_softmax(logits, dim=-1)
